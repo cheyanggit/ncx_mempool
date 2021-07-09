@@ -18,15 +18,20 @@ int main(int argc, char **argv)
 	ncx_slab_init(sp);
 
 	int i;
-	for (i = 0; i < 1000000; i++) 
+	int count = 65;//1000000;
+	for (i = 0; i < count; i++) 
 	{   
-		p = ncx_slab_alloc(sp, 128 + i); 
+		//p = ncx_slab_alloc(sp, 128 + i); 
+		//p = ncx_slab_alloc(sp, 64 ); 
+		//p = ncx_slab_alloc(sp, 128 ); 
+		p = ncx_slab_alloc(sp, 32 ); 
+
 		if (p == NULL) 
 		{   
 			printf("%d\n", i); 
 			return -1; 
 		}   
-		ncx_slab_free(sp, p); 
+		//ncx_slab_free(sp, p); 
 	}   
 	ncx_slab_stat(sp, &stat);
 

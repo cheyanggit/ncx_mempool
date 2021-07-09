@@ -16,6 +16,7 @@ typedef intptr_t        ncx_int_t;
 #endif
 
 #define ncx_align(d, a)     (((d) + (a - 1)) & ~(a - 1))
+// p 是内存指针，a 是对齐字节数：（让这个地址超出字节对齐地址，再把超出的部分减掉就实现对齐了。说白了就是先进位，再把余数清零）
 #define ncx_align_ptr(p, a)                                                   \
 	    (u_char *) (((uintptr_t) (p) + ((uintptr_t) a - 1)) & ~((uintptr_t) a - 1))
 

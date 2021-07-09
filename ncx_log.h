@@ -6,7 +6,7 @@
 #define LV_INFO  4
 #define LV_ERROR 8
 #define LV_ALERT 16
-
+/*
 #define log(level, format, ...) \
 	do { \
 		if ( level >= LOG_LEVEL ) {\
@@ -19,6 +19,23 @@
 #define debug(format, ...) log(LV_DEBUG, format, ##__VA_ARGS__)
 #define info(format, ...)  log(LV_INFO , format, ##__VA_ARGS__)
 #define error(format, ...) log(LV_ERROR, format, ##__VA_ARGS__)
-#define alert(format, ...) log(LV_ALERT, format, ##__VA_ARGS__)
+#define alert(format, ...) log(LV_ALERT, format, ##__VA_ARGS__)*/
+
+#ifndef trace
+#define trace(format, ...) 
+#endif
+#ifndef debug
+#define debug(format, ...) 
+#endif
+#ifndef info
+#define info(format, ...)  
+#endif
+#ifndef error
+#define error(format, ...) 
+#endif
+#ifndef alert
+#define alert(format, ...)
+#endif
+
 
 #endif

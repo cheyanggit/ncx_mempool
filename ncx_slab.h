@@ -9,25 +9,25 @@
 typedef struct ncx_slab_page_s  ncx_slab_page_t;
 
 struct ncx_slab_page_s {
-    uintptr_t         slab;
-    ncx_slab_page_t  *next;
+    uintptr_t         slab;//多种情况，多个用途（1.分配新页时：剩余页数量 2.分配obj内存时：一对多，表示分配obj的占用情况(是否使用)，以比特位表示）
+    ncx_slab_page_t  *next;//分配较小slob时，next指向slab page在pool->pages的位置
     uintptr_t         prev;
 };
 
 
 typedef struct {
-    size_t            min_size;
-    size_t            min_shift;
+    size_t            min_size;//最小分配单元
+    size_t            min_shift;//最小分配单元，对应位移 3
 
-    ncx_slab_page_t  *pages;
-    ncx_slab_page_t   free;
+    ncx_slab_page_t  *pages; //页数组
+    ncx_slab_page_t   free; //空闲页链表
 
-    u_char           *start;
-    u_char           *end;
+    u_char           *start; //可分配空间的起始地址
+    u_char           *end; //内存块的结束地址
 
 	ncx_shmtx_t		 mutex;
 
-    void             *addr;
+    void             *addr; //指向ncx_slab_pool_t开头
 } ncx_slab_pool_t;
 
 typedef struct {

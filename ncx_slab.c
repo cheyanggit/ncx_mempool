@@ -51,12 +51,12 @@ static void ncx_slab_free_pages(ncx_slab_pool_t *pool, ncx_slab_page_t *page,
     ncx_uint_t pages);
 static bool ncx_slab_empty(ncx_slab_pool_t *pool, ncx_slab_page_t *page);
 
-static ncx_uint_t  ncx_slab_max_size;
-static ncx_uint_t  ncx_slab_exact_size;
-static ncx_uint_t  ncx_slab_exact_shift;
-static ncx_uint_t  ncx_pagesize;
-static ncx_uint_t  ncx_pagesize_shift;
-static ncx_uint_t  ncx_real_pages;
+static ncx_uint_t  ncx_slab_max_size;//2048
+static ncx_uint_t  ncx_slab_exact_size;//64
+static ncx_uint_t  ncx_slab_exact_shift;//6
+static ncx_uint_t  ncx_pagesize; //4K
+static ncx_uint_t  ncx_pagesize_shift;//12
+static ncx_uint_t  ncx_real_pages;  // 对齐后，在计算page的个数
 
 void
 ncx_slab_init(ncx_slab_pool_t *pool)
@@ -67,26 +67,26 @@ ncx_slab_init(ncx_slab_pool_t *pool)
     ncx_slab_page_t  *slots;
 
 	/*pagesize*/
-	ncx_pagesize = getpagesize();
+	ncx_pagesize = getpagesize();//4K
 	for (n = ncx_pagesize, ncx_pagesize_shift = 0; 
 			n >>= 1; ncx_pagesize_shift++) { /* void */ }
 
     /* STUB */
     if (ncx_slab_max_size == 0) {
-        ncx_slab_max_size = ncx_pagesize / 2;
-        ncx_slab_exact_size = ncx_pagesize / (8 * sizeof(uintptr_t));
+        ncx_slab_max_size = ncx_pagesize / 2;//2K
+        ncx_slab_exact_size = ncx_pagesize / (8 * sizeof(uintptr_t));//64  uintptr_t 类型的位图变量表示的页划分
         for (n = ncx_slab_exact_size; n >>= 1; ncx_slab_exact_shift++) {
             /* void */
         }
     }
 
-    pool->min_size = 1 << pool->min_shift;
+    pool->min_size = 1 << pool->min_shift;//8byte
 
-    p = (u_char *) pool + sizeof(ncx_slab_pool_t);
-    slots = (ncx_slab_page_t *) p;
+    p = (u_char *) pool + sizeof(ncx_slab_pool_t);//sizeof:80
+    slots = (ncx_slab_page_t *) p;//sizeof(page):24
 
     n = ncx_pagesize_shift - pool->min_shift;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i++) {//9([0~8])
         slots[i].slab = 0;
         slots[i].next = &slots[i];
         slots[i].prev = 0;
@@ -94,7 +94,7 @@ ncx_slab_init(ncx_slab_pool_t *pool)
 
     p += n * sizeof(ncx_slab_page_t);
 
-    size = pool->end - p;
+    size = pool->end - p;//pages[] + cache
     ncx_slab_junk(p, size);
 
     pages = (ncx_uint_t) (size / (ncx_pagesize + sizeof(ncx_slab_page_t)));
@@ -104,9 +104,9 @@ ncx_slab_init(ncx_slab_pool_t *pool)
     pool->pages = (ncx_slab_page_t *) p;
 
     pool->free.prev = 0;
-    pool->free.next = (ncx_slab_page_t *) p;
-
-    pool->pages->slab = pages;
+    pool->free.next = (ncx_slab_page_t *) p;//可用的page
+    //page数据第一个元素
+    pool->pages->slab = pages;//994
     pool->pages->next = &pool->free;
     pool->pages->prev = (uintptr_t) &pool->free;
 
@@ -114,7 +114,7 @@ ncx_slab_init(ncx_slab_pool_t *pool)
                   ncx_align_ptr((uintptr_t) p + pages * sizeof(ncx_slab_page_t),
                                  ncx_pagesize);
 
-	ncx_real_pages = (pool->end - pool->start) / ncx_pagesize;
+	ncx_real_pages = (pool->end - pool->start) / ncx_pagesize;//994 地址对齐后还是994：可能会少一
 	pool->pages->slab = ncx_real_pages;
 }
 
@@ -182,7 +182,7 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
                 bitmap = (uintptr_t *) (pool->start + p);
 
                 map = (1 << (ncx_pagesize_shift - shift))
-                          / (sizeof(uintptr_t) * 8);
+                          / (sizeof(uintptr_t) * 8);//128/8*8=2  计算需要几个uintptr_t类型位图
 
                 for (n = 0; n < map; n++) {
 
@@ -263,19 +263,20 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
 
         } else { /* shift > ncx_slab_exact_shift */
 
-            n = ncx_pagesize_shift - (page->slab & NCX_SLAB_SHIFT_MASK);
+            n = ncx_pagesize_shift - (page->slab & NCX_SLAB_SHIFT_MASK);//已经占用移位->可移动位数
             n = 1 << n;
             n = ((uintptr_t) 1 << n) - 1;
-            mask = n << NCX_SLAB_MAP_SHIFT;
+            mask = n << NCX_SLAB_MAP_SHIFT;//0xffffffff00000000
  
-            do {
-                if ((page->slab & NCX_SLAB_MAP_MASK) != mask) {
+            do {//高32位表示占用情况：0x100000000 表示，占用一个
+                if ((page->slab & NCX_SLAB_MAP_MASK) != mask) {//slab&0xffffffff00000000   != 0xffffffff
 
-                    for (m = (uintptr_t) 1 << NCX_SLAB_MAP_SHIFT, i = 0;
+                    //m为位图表示内存使用情况
+                    for (m = (uintptr_t) 1 << NCX_SLAB_MAP_SHIFT, i = 0;//NCX_SLAB_MAP_SHIFT=32
                          m & mask;
                          m <<= 1, i++)
                     {
-                        if ((page->slab & m)) {
+                        if ((page->slab & m)) {//判断当前位是否已经使用
                             continue;
                         }
 
@@ -309,19 +310,20 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
 
     if (page) {
         if (shift < ncx_slab_exact_shift) {
-            p = (page - pool->pages) << ncx_pagesize_shift;
-            bitmap = (uintptr_t *) (pool->start + p);
+            // 小于128时 
+            p = (page - pool->pages) << ncx_pagesize_shift;//数据页对应的首地址
+            bitmap = (uintptr_t *) (pool->start + p);//前8个字节
 
-            s = 1 << shift;
+            s = 1 << shift;//申请size大小
             n = (1 << (ncx_pagesize_shift - shift)) / 8 / s;
 
             if (n == 0) {
                 n = 1;
             }
 
-            bitmap[0] = (2 << n) - 1;
+            bitmap[0] = (2 << n) - 1;//第一个字节为3 :0011
 
-            map = (1 << (ncx_pagesize_shift - shift)) / (sizeof(uintptr_t) * 8);
+            map = (1 << (ncx_pagesize_shift - shift)) / (sizeof(uintptr_t) * 8);//计算申请的size，占用内存块数、1<<7  128/64=2块
 
             for (i = 1; i < map; i++) {
                 bitmap[i] = 0;
@@ -333,14 +335,14 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
 
             slots[slot].next = page;
 
-            p = ((page - pool->pages) << ncx_pagesize_shift) + s * n;
-            p += (uintptr_t) pool->start;
+            p = ((page - pool->pages) << ncx_pagesize_shift) + s * n;//偏移s*n=32*1=32字节
+            p += (uintptr_t) pool->start;//p=p+start=32+startH
 
             goto done;
 
         } else if (shift == ncx_slab_exact_shift) {
-
-            page->slab = 1;
+            //  slab位图表示64块内存使用情况
+            page->slab = 1;//第一块空间被占用
             page->next = &slots[slot];
             page->prev = (uintptr_t) &slots[slot] | NCX_SLAB_EXACT;
 
@@ -352,8 +354,8 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
             goto done;
 
         } else { /* shift > ncx_slab_exact_shift */
-
-            page->slab = ((uintptr_t) 1 << NCX_SLAB_MAP_SHIFT) | shift;
+            // 低位表示存放数据的大小
+            page->slab = ((uintptr_t) 1 << NCX_SLAB_MAP_SHIFT) | shift;//NCX_SLAB_MAP_SHIFT=32
             page->next = &slots[slot];
             page->prev = (uintptr_t) &slots[slot] | NCX_SLAB_BIG;
 
@@ -402,7 +404,7 @@ ncx_slab_free_locked(ncx_slab_pool_t *pool, void *p)
         goto fail;
     }
 
-    n = ((u_char *) p - pool->start) >> ncx_pagesize_shift;
+    n = ((u_char *) p - pool->start) >> ncx_pagesize_shift;//size找下page表下表
     page = &pool->pages[n];
     slab = page->slab;
     type = page->prev & NCX_SLAB_PAGE_MASK;
@@ -411,8 +413,8 @@ ncx_slab_free_locked(ncx_slab_pool_t *pool, void *p)
 
     case NCX_SLAB_SMALL:
 
-        shift = slab & NCX_SLAB_SHIFT_MASK;
-        size = 1 << shift;
+        shift = slab & NCX_SLAB_SHIFT_MASK;//0x000000000000000f
+        size = 1 << shift;//计算出这块内存，申请时使用多大size
 
         if ((uintptr_t) p & (size - 1)) {
             goto wrong_chunk;
@@ -600,7 +602,7 @@ ncx_slab_alloc_pages(ncx_slab_pool_t *pool, ncx_uint_t pages)
 	
         if (page->slab >= pages) {
 
-            if (page->slab > pages) {
+            if (page->slab > pages) {//从第二个开始
                 page[pages].slab = page->slab - pages;
                 page[pages].next = page->next;
                 page[pages].prev = page->prev;
@@ -615,18 +617,18 @@ ncx_slab_alloc_pages(ncx_slab_pool_t *pool, ncx_uint_t pages)
                 page->next->prev = page->prev;
             }
 
-            page->slab = pages | NCX_SLAB_PAGE_START;
+            page->slab = pages | NCX_SLAB_PAGE_START;//0x8000000000000000
             page->next = NULL;
-            page->prev = NCX_SLAB_PAGE;
+            page->prev = NCX_SLAB_PAGE;//0
 
             if (--pages == 0) {
                 return page;
             }
 
             for (p = page + 1; pages; pages--) {
-                p->slab = NCX_SLAB_PAGE_BUSY;
+                p->slab = NCX_SLAB_PAGE_BUSY;//0xffffffffffffffff
                 p->next = NULL;
-                p->prev = NCX_SLAB_PAGE;
+                p->prev = NCX_SLAB_PAGE;//0
                 p++;
             }
 
