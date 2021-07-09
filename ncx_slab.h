@@ -8,10 +8,11 @@
 
 typedef struct ncx_slab_page_s  ncx_slab_page_t;
 
+// 页结构体
 struct ncx_slab_page_s {
     uintptr_t         slab;//多种情况，多个用途（1.分配新页时：剩余页数量 2.分配obj内存时：一对多，表示分配obj的占用情况(是否使用)，以比特位表示）
     ncx_slab_page_t  *next;//分配较小slob时，next指向slab page在pool->pages的位置
-    uintptr_t         prev;
+    uintptr_t         prev;//上一个
 };
 
 

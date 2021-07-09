@@ -51,11 +51,16 @@ static void ncx_slab_free_pages(ncx_slab_pool_t *pool, ncx_slab_page_t *page,
     ncx_uint_t pages);
 static bool ncx_slab_empty(ncx_slab_pool_t *pool, ncx_slab_page_t *page);
 
-static ncx_uint_t  ncx_slab_max_size;//2048
-static ncx_uint_t  ncx_slab_exact_size;//64
-static ncx_uint_t  ncx_slab_exact_shift;//6
-static ncx_uint_t  ncx_pagesize; //4K
-static ncx_uint_t  ncx_pagesize_shift;//12
+static ncx_uint_t  ncx_slab_max_size;//2048    slab的一次最大分配空间，默认为pagesize/2
+/*对于64位与32位系统，nginx里面默认的值是不一样的，我们看到数字可能会更好理解一点，所以我们就以32位来看，用实际的数字来说话！
+这个时依赖slab的分配算法.它的值是这样来的.4096/32，2048是slab页大小，而32是一个int的位数，最后的值是128。
+why? 我们在分配时,在一页中，我们可以将这一页分成多个块,而某个块需要标记是否被分配,而一页空间正好被分成32个128字节大小的块，于是我们可以用一个int的32位表示这块的使用情况，
+而此时,我们是使用ngx_slab_page_s结构体中的slab成员来表示块的使用情况的。另外，在分配大于128与小于128时，表示块的占用情况有所有同
+*/
+static ncx_uint_t  ncx_slab_exact_size;//64     slab精确分配大小，这个是一个分界点，通常是4096/32，为什么会这样，我们后面会有介绍
+static ncx_uint_t  ncx_slab_exact_shift;//6     slab精确分配大小对应的移位数
+static ncx_uint_t  ncx_pagesize; //4K        // 页大小
+static ncx_uint_t  ncx_pagesize_shift;//12  // 页大小对应的移位数
 static ncx_uint_t  ncx_real_pages;  // 对齐后，在计算page的个数
 
 void
@@ -73,8 +78,11 @@ ncx_slab_init(ncx_slab_pool_t *pool)
 
     /* STUB */
     if (ncx_slab_max_size == 0) {
+        // 最大分配空间为页大小的一半
         ncx_slab_max_size = ncx_pagesize / 2;//2K
+        // 精确分配大小，8为一个字节的位数，sizeof(uintptr_t)为一个uintptr_t的字节，我们后面会根据这个size来判断使用不同的分配算法 
         ncx_slab_exact_size = ncx_pagesize / (8 * sizeof(uintptr_t));//64  uintptr_t 类型的位图变量表示的页划分
+        // 计算出此精确分配的移位数
         for (n = ncx_slab_exact_size; n >>= 1; ncx_slab_exact_shift++) {
             /* void */
         }
@@ -82,21 +90,31 @@ ncx_slab_init(ncx_slab_pool_t *pool)
 
     pool->min_size = 1 << pool->min_shift;//8byte
 
+    // p 指向slot数组
     p = (u_char *) pool + sizeof(ncx_slab_pool_t);//sizeof:80
+
+    // 某一个大小范围内的页，放到一起，具有相同的移位数
     slots = (ncx_slab_page_t *) p;//sizeof(page):24
 
+    // 最大移位数，减去最小移位数，得到需要的slot数量  
+    // 默认为8
     n = ncx_pagesize_shift - pool->min_shift;
+    // 初始化各个slot
     for (i = 0; i < n; i++) {//9([0~8])
         slots[i].slab = 0;
         slots[i].next = &slots[i];
         slots[i].prev = 0;
     }
 
+    // 指向页数组
     p += n * sizeof(ncx_slab_page_t);
 
     size = pool->end - p;//pages[] + cache
+
+    // 将开始的size个字节设置为0
     ncx_slab_junk(p, size);
 
+    // 计算出当前内存空间可以放下多少个页，此时的计算没有进行对齐，在后面会进行调整
     pages = (ncx_uint_t) (size / (ncx_pagesize + sizeof(ncx_slab_page_t)));
 
     ncx_memzero(p, pages * sizeof(ncx_slab_page_t));
@@ -110,10 +128,12 @@ ncx_slab_init(ncx_slab_pool_t *pool)
     pool->pages->next = &pool->free;
     pool->pages->prev = (uintptr_t) &pool->free;
 
+    // 计算出对齐后的返回内存的地址
     pool->start = (u_char *)
                   ncx_align_ptr((uintptr_t) p + pages * sizeof(ncx_slab_page_t),
                                  ncx_pagesize);
 
+    // 说明之前是没有对齐过的，由于对齐之后，最后那一页，有可能不够一页，所以要去掉那一块
 	ncx_real_pages = (pool->end - pool->start) / ncx_pagesize;//994 地址对齐后还是994：可能会少一
 	pool->pages->slab = ncx_real_pages;
 }
@@ -142,14 +162,19 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
     ncx_uint_t        i, slot, shift, map;
     ncx_slab_page_t  *page, *prev, *slots;
 
+    // 如果超出slab最大可分配大小，即大于2048，则我们需要计算出需要的page数，  
+    // 然后从空闲页中分配出连续的几个可用页
     if (size >= ncx_slab_max_size) {
 
 		debug("slab alloc: %zu", size);
 
+        // 计算需要的页数，然后分配指针页数
         page = ncx_slab_alloc_pages(pool, (size >> ncx_pagesize_shift)
                                           + ((size % ncx_pagesize) ? 1 : 0));
         if (page) {
+            // 由返回page在页数组中的偏移量，计算出实际数组地址的偏移量
             p = (page - pool->pages) << ncx_pagesize_shift;
+            // 计算出实际的数据地址
             p += (uintptr_t) pool->start;
 
         } else {
@@ -159,28 +184,47 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
         goto done;
     }
 
+    // 如果小于2048，则启用slab分配算法进行分配
+
+     // 计算出此size的移位数以及此size对应的slot以及移位数
     if (size > pool->min_size) {
         shift = 1;
+        // 计算移位数
         for (s = size - 1; s >>= 1; shift++) { /* void */ }
+        // 由移位数得到slot
         slot = shift - pool->min_shift;
 
     } else {
+         // 小于最小可分配大小的都放到一个slot里面
         size = pool->min_size;
         shift = pool->min_shift;
+        // 因为小于最小分配的，所以就放在第一个slot里面 
         slot = 0;
     }
 
     slots = (ncx_slab_page_t *) ((u_char *) pool + sizeof(ncx_slab_pool_t));
+    // 得到当前slot所占用的页
     page = slots[slot].next;
 
+    // 找到一个可用空间
     if (page->next != page) {
-
-        if (shift < ncx_slab_exact_shift) {
+        // 分配大小小于128字节时的算法，看不懂的童鞋可以先看等于128字节的情况  
+        // 当分配空间小于128字节时，我们不可能用一个int来表示这些块的占用情况  
+        // 此时，我们就需要几个int了，即一个bitmap数组  
+        // 我们此时没有使用page->slab，而是使用页数据空间的开始几个int空间来表示了  
+        // 看代码 
+        if (shift < ncx_slab_exact_shift) {//小于精确分配
 
             do {
+                // 得到页数据部分
                 p = (page - pool->pages) << ncx_pagesize_shift;
-                bitmap = (uintptr_t *) (pool->start + p);
 
+                // 页的开始几个int大小的空间来存放位图数据
+                bitmap = (uintptr_t *) (pool->start + p);
+                
+                //32=》2位 16=》4位  8=》8位
+                // 当前页，在当前size下可分成map*32个块  
+                // 我们需要map个int来表示这些块空间
                 map = (1 << (ncx_pagesize_shift - shift))
                           / (sizeof(uintptr_t) * 8);//128/8*8=2  计算需要几个uintptr_t类型位图
 
@@ -190,29 +234,34 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
 
                         for (m = 1, i = 0; m; m <<= 1, i++) {
                             if ((bitmap[n] & m)) {
+                                // 当前位表示的块已被使用了
                                 continue;
                             }
 
+                            // 设置已占用
                             bitmap[n] |= m;
 
                             i = ((n * sizeof(uintptr_t) * 8) << shift)
                                 + (i << shift);
 
+                            // 如果当前bitmap所表示的空间已都被占用，就查找下一个bitmap
                             if (bitmap[n] == NCX_SLAB_BUSY) {
                                 for (n = n + 1; n < map; n++) {
+                                    // 找到下一个还剩下空间的bitmap
                                      if (bitmap[n] != NCX_SLAB_BUSY) {
                                          p = (uintptr_t) bitmap + i;
 
                                          goto done;
                                      }
                                 }
-
+                                // 剩下所有的bitmap都被占用了，表明当前的页已完全被使用了，把当前页从链表中删除 
                                 prev = (ncx_slab_page_t *)
                                             (page->prev & ~NCX_SLAB_PAGE_MASK);
                                 prev->next = page->next;
                                 page->next->prev = page->prev;
 
                                 page->next = NULL;
+                                // 小内存分配 
                                 page->prev = NCX_SLAB_SMALL;
                             }
 
@@ -227,25 +276,33 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
 
             } while (page);
 
-        } else if (shift == ncx_slab_exact_shift) {
+        } else if (shift == ncx_slab_exact_shift) {//精确分配
+                // 如果分配大小正好是128字节，则一页可以分成32个块，我们可以用一个int来表示这些个块的使用情况  
+            // 这里我们使用page->slab来表示这些块的使用情况，当所有块被占用后，该值就变成了0xffffffff，即NGX_SLAB_BUSY  
+            // 表示该块都被占用了
 
             do {
+                // 当前页可用
                 if (page->slab != NCX_SLAB_BUSY) {
 
                     for (m = 1, i = 0; m; m <<= 1, i++) {
+                        // 如果当前位被使用了，就继续查找下一块
                         if ((page->slab & m)) {
                             continue;
                         }
 
+                        // 设置当前为已被使用
                         page->slab |= m;
-  
+                        // 最后一块也被使用了，就表示此页已使用完
                         if (page->slab == NCX_SLAB_BUSY) {
+                            // 将当前页从链表中移除
                             prev = (ncx_slab_page_t *)
                                             (page->prev & ~NCX_SLAB_PAGE_MASK);
                             prev->next = page->next;
                             page->next->prev = page->prev;
 
                             page->next = NULL;
+                            // 标识使用类型，精确
                             page->prev = NCX_SLAB_EXACT;
                         }
 
@@ -256,32 +313,50 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
                         goto done;
                     }
                 }
-
+                // 查找下一页 
                 page = page->next;
 
             } while (page);
 
         } else { /* shift > ncx_slab_exact_shift */
+            // 当需要分配的空间大于128或64时，我们可以用一个int的位来表示这些空间  64位机器是64
+            //所以我们依然采用跟等于128时类似的情况，用page->slab来表示  
+            // 但由于 大于128的情况比较多，移位数分别为8、9、10、11这些情况  
+            // 对于一个页，我们如何来知道这个页的分配大小呢？  
+            // 而我们知道，最小我们只需要使用16位即可表示这些空间了，即分配大小为256~512时  
+            // 那么我们采用高16位来表示这些空间的占用情况  
+            // 而最低位，我们也利用起来，表示此页的分配大小，即保存移位数  
+            // 比如我们分配256，当分配第一个空间时，此时的page->slab位图情况是：0x0001008  
+            // 那分配下一空间就是0x0003008了，当为0xffff008时，就分配完了  
+            // 看代码  
 
+
+            // page->slab & NGX_SLAB_SHIFT_MASK 即得到最低一位的值，其实就是当前页的分配大小的移位数  
+            // ngx_pagesize_shift减掉后，就是在一页中标记这些块所需要的移位数，也就是块数对应的移位数 
             n = ncx_pagesize_shift - (page->slab & NCX_SLAB_SHIFT_MASK);//已经占用移位->可移动位数
+            // 得到一个页面所能放下的块数
             n = 1 << n;
+            // 得到表示这些块数都用完的bitmap，用现在是低16位的
             n = ((uintptr_t) 1 << n) - 1;
+            // 将低16位转换成高16位，因为我们是用高16位来表示空间地址的占用情况的
             mask = n << NCX_SLAB_MAP_SHIFT;//0xffffffff00000000
  
             do {//高32位表示占用情况：0x100000000 表示，占用一个
+                // 判断高16位是否全被占用了
                 if ((page->slab & NCX_SLAB_MAP_MASK) != mask) {//slab&0xffffffff00000000   != 0xffffffff
 
                     //m为位图表示内存使用情况
+                    // NGX_SLAB_MAP_SHIFT 为移位偏移， 得到0x10000
                     for (m = (uintptr_t) 1 << NCX_SLAB_MAP_SHIFT, i = 0;//NCX_SLAB_MAP_SHIFT=32
                          m & mask;
                          m <<= 1, i++)
-                    {
+                    {   // 当前块是否被占用 
                         if ((page->slab & m)) {//判断当前位是否已经使用
                             continue;
                         }
-
+                        // 将当前位设置成1
                         page->slab |= m;
-
+                        // 当前页是否完全被占用完
                         if ((page->slab & NCX_SLAB_MAP_MASK) == mask) {
                             prev = (ncx_slab_page_t *)
                                             (page->prev & ~NCX_SLAB_PAGE_MASK);
@@ -305,15 +380,15 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
             } while (page);
         }
     }
-
+    // 如果当前slab对应的page中没有空间可分配了，则重新从空闲page中分配一个页  
     page = ncx_slab_alloc_pages(pool, 1);
 
     if (page) {
         if (shift < ncx_slab_exact_shift) {
-            // 小于128时 
+            // 精确分配，小于64时 
             p = (page - pool->pages) << ncx_pagesize_shift;//数据页对应的首地址
             bitmap = (uintptr_t *) (pool->start + p);//前8个字节
-
+            // 需要的空间大小
             s = 1 << shift;//申请size大小
             n = (1 << (ncx_pagesize_shift - shift)) / 8 / s;
 
@@ -322,7 +397,7 @@ ncx_slab_alloc_locked(ncx_slab_pool_t *pool, size_t size)
             }
 
             bitmap[0] = (2 << n) - 1;//第一个字节为3 :0011
-
+            // 需要使用的uintptr_t数组个数
             map = (1 << (ncx_pagesize_shift - shift)) / (sizeof(uintptr_t) * 8);//计算申请的size，占用内存块数、1<<7  128/64=2块
 
             for (i = 1; i < map; i++) {
