@@ -22,7 +22,7 @@ int main(int argc, char **argv)
 	for (i = 0; i < count; i++) 
 	{   
 		//p = ncx_slab_alloc(sp, 128 + i); 
-		//p = ncx_slab_alloc(sp, 64 ); 
+		//p = ncx_slab_alloc(sp, 64 ); // 64字节
 		//p = ncx_slab_alloc(sp, 128 ); 
 		p = ncx_slab_alloc(sp, 32 ); 
 
